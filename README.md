@@ -18,7 +18,7 @@ Generation done, O:12, X:9
 X O . O . . . . 
 O . . O . X . . 
 . O O . . . . . 
-. . O . . . X O е
+. . O . . . X O 
 . . . . O . X . 
 O . X . O . . . 
 . . . O . . . . 
