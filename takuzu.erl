@@ -221,10 +221,11 @@ check_cell(Field, N, Size, CheckFilled) ->
   end.
 
 %% Получает для каждой ячейки повод ее заполнить
-check_field(Field) -> check_field(Field, false).
-check_field(Field, CheckFilled) ->
+check_field(Field, Parallel) -> check_field(Field, Parallel, false).
+check_field(Field, Parallel, CheckFilled) ->
   Size = field_size(Field),
-  [check_cell(Field, N, Size, CheckFilled) || N <- lists:seq(1, Size * Size)].
+  apply(case Parallel of true -> fun pmap/2; _ -> fun lists:map/2 end,
+    [fun(N) -> check_cell(Field, N, Size, CheckFilled) end, lists:seq(1, Size * Size)]).
 
 set_nth(N, List, Val) when N > 0 -> set_nth([], N, List, Val).
 set_nth(Acc, 1, [_ | T], Val) -> lists:reverse(Acc, [Val | T]);
@@ -237,8 +238,8 @@ find_all(Val, List) ->
   lists:reverse(RRes).
 
 %% Заполняет случайную клетку допустимым образом (соблюдая правила)
-random_step_checked(Field) ->
-  Suggestions = check_field(Field),
+random_step_checked(Field, Parallel) ->
+  Suggestions = check_field(Field, Parallel),
   AvailPositions = find_all(false, Suggestions),
   case AvailPositions of
     [] -> {impossibru, Field};
@@ -262,27 +263,27 @@ is_solved(Field) -> lists:all(fun(I) -> I /= 0 end, Field).
 any_suggestions(Suggestions) -> lists:any(fun({_, _, _}) -> true; (_) -> false end, Suggestions).
 
 %% Пытается решить заданное поле
-try_solve(Field) -> try_solve_2([Field]).
-try_solve_2([LastStep | Steps]) ->
+try_solve(Field, Parallel) -> try_solve_2([Field], Parallel).
+try_solve_2([LastStep | Steps], Parallel) ->
   case is_solved(LastStep) of
     true -> {ok, lists:reverse([LastStep | Steps])};
     _ ->
-      Suggestions = check_field(LastStep),
+      Suggestions = check_field(LastStep, Parallel),
       case any_suggestions(Suggestions) of
         true ->
           NextStep = apply_suggestions(LastStep, Suggestions),
-          try_solve_2([NextStep, LastStep | Steps]);
+          try_solve_2([NextStep, LastStep | Steps], Parallel);
         _ -> {impossibru, lists:reverse([LastStep | Steps])}
       end
   end.
 
 %% Генерирует поле путем постепенного заполнения клеток рандомом и пытаясь решить каждую итерацию
-generate(Size) ->
+generate(Size, Parallel) ->
   Initial = takuzu:new(Size), %%takuzu:power_fun(fun takuzu:random_step/1, 2, takuzu:new(Size)),
-  generate_solvable(Initial).
+  generate_solvable(Initial, Parallel).
 
-generate_print(Size) ->
-  {ok, Res} = generate(Size),
+generate_print(Size, Parallel) ->
+  {ok, Res} = generate(Size, Parallel),
   {Ones, Twos} = {count_elements(Res, 1), count_elements(Res, 2)},
   io:format("Generation done, O:~p, X:~p~n", [Ones, Twos]),
   print_field(Res).
@@ -290,22 +291,39 @@ generate_print(Size) ->
 stats(List) ->
   Len = length(List),
   Mean = lists:sum(List) / Len,
-  Variance = math:sqrt(lists:sum([ (X - Mean) * (X - Mean) || X <- List]) / Len),
+  Variance = math:sqrt(lists:sum([(X - Mean) * (X - Mean) || X <- List]) / Len),
   {mean, trunc(Mean) / 1000, variance, trunc(Variance) / 1000}.
 
-measure(F, Count) ->
-  {TotalTime, Times} = (timer:tc(fun()->[begin {MSec, _} = timer:tc(fun() -> F() end), MSec end || _ <- lists:seq(1, Count)] end)),
-  {TotalTime/1000, stats(Times)}.
+pmap(F, List) ->
+  Self = self(),
+  Pids = lists:map(fun(I) -> spawn(fun() -> pmap_f(Self, F, I) end) end, List),
+  pmap_gather(Pids).
 
-generate_solvable(Field) ->
+pmap_gather([H | T]) ->
+  receive
+    {H, Ret} -> [Ret | pmap_gather(T)]
+  end;
+pmap_gather([]) ->
+  [].
+
+pmap_f(Parent, F, I) ->
+  Parent ! {self(), (catch F(I))}.
+
+measure(F, Count) ->
+  {TotalTime, Times} = (timer:tc(fun() ->
+    lists:map(fun(_) -> {MSec, _} = timer:tc(fun() -> F() end), MSec end, lists:seq(1, Count)) end)),
+%%   io:format("~p~n", [Times]),
+  {TotalTime / 1000, stats(Times)}.
+
+generate_solvable(Field, Parallel) ->
   %% Пробуем решить что дали
-  {SolveRes, [First | _]} = try_solve(Field),
+  {SolveRes, [First | _]} = try_solve(Field, Parallel),
   case SolveRes of
-    ok -> {ok, reduce_solvable(First)}; %% Если решилось, это вин
-    _ -> case random_step_checked(Field) of %% Если не решилось, заполняем случайную клетку допустимым образом
+    ok -> {ok, reduce_solvable(First, Parallel)}; %% Если решилось, это вин
+    _ -> case random_step_checked(Field, Parallel) of %% Если не решилось, заполняем случайную клетку допустимым образом
            {ok, NextGen} ->
 %%              print_field(Field),
-             generate_solvable(NextGen) %% Если заполнилось, снова пытаемся решить
+             generate_solvable(NextGen, Parallel) %% Если заполнилось, снова пытаемся решить
 %%           _ -> {impossibru, Field} %% Если не заполнилось, тогда ой, этого вообще быть не может
          end
   end.
@@ -319,14 +337,14 @@ remove_suggestions(Field, Suggestions) ->
      end
    end || {Old, Sugg} <- lists:zip(Field, Suggestions)].
 
-reduce_solvable(Field) ->
-  Suggestions = check_field(Field, true),
-  case any_suggestions(Suggestions) of
-    true ->
-%      print_field(Field),
-%      io:format("Can remove: ~p~n", [Suggestions]),
-      reduce_solvable(remove_suggestions(Field, Suggestions));
-    _ -> Field
+reduce_solvable(Field, Parallel) ->
+  Suggestions = check_field(Field, Parallel, true),
+  case remove_suggestions(Field, Suggestions) of
+    Field -> Field;
+    StrippedField ->
+%%       print_field(Field),
+%%       io:format("Can remove: ~p~n", [Suggestions]),
+      reduce_solvable(StrippedField, Parallel)
   end.
 
 
