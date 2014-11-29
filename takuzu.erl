@@ -26,10 +26,11 @@ generate(Size, Parallel) ->
 
 generate_print(Size) -> generate_print(Size, true).
 generate_print(Size, Parallel) ->
-  {ok, Res} = generate(Size, Parallel),
+  {Time, {ok, Res}} = timer:tc(fun() -> generate(Size, Parallel) end),
   {Ones, Twos} = {count_elements(Res, 1), count_elements(Res, 2)},
   io:format("Generation done, O:~p, X:~p~n", [Ones, Twos]),
-  print_field(Res).
+  print_field(Res),
+  io:format("~p ms~n", [Time / 1000]).
 
 %% Count раз вызывает функцию F/0, засекая время, возвращает статистику
 measure(F, Count) ->

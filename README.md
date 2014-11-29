@@ -15,18 +15,25 @@ $ erl
   All 15 tests passed.
 ok
 
-2> timer:tc(fun()->takuzu:generate(8) end).
-Generation done, O:12, X:9
-X O . O . . . . 
-O . . O . X . . 
-. O O . . . . . 
-. . O . . . X O 
-. . . . O . X . 
-O . X . O . . . 
-. . . O . . . . 
-. X X . X . . X 
+2> takuzu:generate_print(8).
+Generation done, O:9, X:9
+X O . O . . . .
+O . . O . X . .
+. O O . . . . .
+. . O . . . X O
+. . . . O . X .
+O . X . O . . .
+. . . O . . . .
+. X X . X . . X
 
-{152386,ok}
+89.212 ms
+ok
+
+3> takuzu:measure(fun()-> takuzu:generate(8, true) end, 20).
+{1702.963,{mean,85.146,variance,17.759}}
+
+4> takuzu:measure(fun()-> takuzu:generate(8, false) end, 20).
+{3132.751,{mean,156.636,variance,25.663}}
 ```
 
 ## Правила takuzu
