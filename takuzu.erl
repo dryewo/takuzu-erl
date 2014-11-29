@@ -294,20 +294,20 @@ stats(List) ->
   Variance = math:sqrt(lists:sum([(X - Mean) * (X - Mean) || X <- List]) / Len),
   {mean, trunc(Mean) / 1000, variance, trunc(Variance) / 1000}.
 
-pmap(F, List) ->
-  Self = self(),
-  Pids = lists:map(fun(I) -> spawn(fun() -> pmap_f(Self, F, I) end) end, List),
-  pmap_gather(Pids).
+pmap(F, L) ->
+  S = self(),
+  Ref = erlang:make_ref(),
+  Pids = lists:map(fun(I) -> spawn(fun() -> pmap_f(S, Ref, F, I) end) end, L),
+  pmap_gather(Pids, Ref).
 
-pmap_gather([H | T]) ->
+pmap_f(Parent, Ref, F, I) ->
+  Parent ! {self(), Ref, (catch F(I))}.
+
+pmap_gather([Pid | T], Ref) ->
   receive
-    {H, Ret} -> [Ret | pmap_gather(T)]
+    {Pid, Ref, Ret} -> [Ret | pmap_gather(T, Ref)]
   end;
-pmap_gather([]) ->
-  [].
-
-pmap_f(Parent, F, I) ->
-  Parent ! {self(), (catch F(I))}.
+pmap_gather([], _) -> [].
 
 measure(F, Count) ->
   {TotalTime, Times} = (timer:tc(fun() ->
