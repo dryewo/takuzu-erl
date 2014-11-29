@@ -279,10 +279,23 @@ try_solve_2([LastStep | Steps]) ->
 %% Генерирует поле путем постепенного заполнения клеток рандомом и пытаясь решить каждую итерацию
 generate(Size) ->
   Initial = takuzu:new(Size), %%takuzu:power_fun(fun takuzu:random_step/1, 2, takuzu:new(Size)),
-  {ok, Res} = generate_solvable(Initial),
+  generate_solvable(Initial).
+
+generate_print(Size) ->
+  {ok, Res} = generate(Size),
   {Ones, Twos} = {count_elements(Res, 1), count_elements(Res, 2)},
   io:format("Generation done, O:~p, X:~p~n", [Ones, Twos]),
   print_field(Res).
+
+stats(List) ->
+  Len = length(List),
+  Mean = lists:sum(List) / Len,
+  Variance = math:sqrt(lists:sum([ (X - Mean) * (X - Mean) || X <- List]) / Len),
+  {mean, trunc(Mean) / 1000, variance, trunc(Variance) / 1000}.
+
+measure(F, Count) ->
+  {TotalTime, Times} = (timer:tc(fun()->[begin {MSec, _} = timer:tc(fun() -> F() end), MSec end || _ <- lists:seq(1, Count)] end)),
+  {TotalTime/1000, stats(Times)}.
 
 generate_solvable(Field) ->
   %% Пробуем решить что дали
