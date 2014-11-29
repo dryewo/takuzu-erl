@@ -10,7 +10,7 @@
 -author("dbalakhonsky").
 
 %% API
--export([generate/2, generate_print/2, measure/2]).
+-export([generate/1, generate/2, generate_print/2, measure/2]).
 -compile([export_all]).
 
 
@@ -19,10 +19,12 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %% Генерирует поле путем постепенного заполнения клеток рандомом и пытаясь решить каждую итерацию
+generate(Size) -> generate(Size, true).
 generate(Size, Parallel) ->
   Initial = takuzu:new(Size),
   generate_solvable(Initial, Parallel).
 
+generate_print(Size) -> generate_print(Size, true).
 generate_print(Size, Parallel) ->
   {ok, Res} = generate(Size, Parallel),
   {Ones, Twos} = {count_elements(Res, 1), count_elements(Res, 2)},
