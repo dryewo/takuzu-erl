@@ -10,18 +10,213 @@
 -author("dbalakhonsky").
 
 %% API
--export([]).
+-export([generate/2, generate_print/2, measure/2]).
 -compile([export_all]).
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Публичные функции
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%% Генерирует поле путем постепенного заполнения клеток рандомом и пытаясь решить каждую итерацию
+generate(Size, Parallel) ->
+  Initial = takuzu:new(Size),
+  generate_solvable(Initial, Parallel).
+
+generate_print(Size, Parallel) ->
+  {ok, Res} = generate(Size, Parallel),
+  {Ones, Twos} = {count_elements(Res, 1), count_elements(Res, 2)},
+  io:format("Generation done, O:~p, X:~p~n", [Ones, Twos]),
+  print_field(Res).
+
+%% Count раз вызывает функцию F/0, засекая время, возвращает статистику
+measure(F, Count) ->
+  {TotalTime, Times} = (timer:tc(fun() ->
+    lists:map(fun(_) -> {MSec, _} = timer:tc(fun() -> F() end), MSec end, lists:seq(1, Count)) end)),
+%%   io:format("~p~n", [Times]),
+  {TotalTime / 1000, stats(Times)}.
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Алгоритм генерации
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+generate_solvable(Field, Parallel) ->
+  %% Пробуем решить что дали
+  {SolveRes, [First | _]} = try_solve(Field, Parallel),
+  case SolveRes of
+    ok -> {ok, reduce_solvable(First, Parallel)}; %% Если решилось, это вин
+    _ -> case random_step_checked(Field, Parallel) of %% Если не решилось, заполняем случайную клетку допустимым образом
+           {ok, NextGen} ->
+%%              print_field(Field),
+             generate_solvable(NextGen, Parallel) %% Если заполнилось, снова пытаемся решить
+%%           _ -> {impossibru, Field} %% Если не заполнилось, тогда ой, этого вообще быть не может
+         end
+  end.
+
+%% Пытается решить заданное поле
+try_solve(Field, Parallel) -> try_solve_2([Field], Parallel).
+try_solve_2([LastStep | Steps], Parallel) ->
+  case is_solved(LastStep) of
+    true -> {ok, lists:reverse([LastStep | Steps])};
+    _ ->
+      Suggestions = check_field(LastStep, Parallel),
+      case any_suggestions(Suggestions) of
+        true ->
+          NextStep = apply_suggestions(LastStep, Suggestions),
+          try_solve_2([NextStep, LastStep | Steps], Parallel);
+        _ -> {impossibru, lists:reverse([LastStep | Steps])}
+      end
+  end.
+
+is_solved(Field) -> lists:all(fun(I) -> I /= 0 end, Field).
+
+any_suggestions(Suggestions) -> lists:any(fun({_, _, _}) -> true; (_) -> false end, Suggestions).
+
+%% Применяет к полю указанные предложения
+apply_suggestions(Field, Suggestions) ->
+  [begin
+     case Sugg of
+       {_, Val, _} -> Val;
+       _ -> Old
+     end
+   end || {Old, Sugg} <- lists:zip(Field, Suggestions)].
+
+%% Заполняет случайную клетку допустимым образом (соблюдая правила)
+random_step_checked(Field, Parallel) ->
+  Suggestions = check_field(Field, Parallel),
+  AvailPositions = find_all(false, Suggestions),
+  case AvailPositions of
+    [] -> {impossibru, Field};
+    _ ->
+      NextPos = random:uniform(length(AvailPositions)),
+      NextVal = random:uniform(2),
+      {ok, set_nth(lists:nth(NextPos, AvailPositions), Field, NextVal)}
+  end.
+
+%% Очищает клетки, которые можно вывести из соседних
+reduce_solvable(Field, Parallel) ->
+  Suggestions = check_field(Field, Parallel, true),
+  case remove_suggestions(Field, Suggestions) of
+    Field -> Field;
+    StrippedField ->
+%%       print_field(Field),
+%%       io:format("Can remove: ~p~n", [Suggestions]),
+      reduce_solvable(StrippedField, Parallel)
+  end.
+
+%% Применяет к полю указанные предложения
+remove_suggestions(Field, Suggestions) ->
+  [begin
+     case Sugg of
+       {_, Old, _} -> 0;
+       _ -> Old
+     end
+   end || {Old, Sugg} <- lists:zip(Field, Suggestions)].
+
+%% Получает для каждой ячейки повод ее заполнить
+check_field(Field, Parallel) -> check_field(Field, Parallel, false).
+check_field(Field, Parallel, CheckFilled) ->
+  Size = field_size(Field),
+  apply(case Parallel of true -> fun pmap/2; _ -> fun lists:map/2 end,
+    [fun(N) -> check_cell(Field, N, Size, CheckFilled) end, lists:seq(1, Size * Size)]).
+
+%% Проверяет ячейку на все условия, возвращает первый найденный повод заполнить ее, false или filled для уже заполненных
+check_cell(Field, N, Size) -> check_cell(Field, N, Size, false).
+check_cell(Field, N, Size, CheckFilled) ->
+  Funs = [
+    {x, fun check_twins/3},
+    {x, fun check_pairs/3},
+    {x, fun check_others/3},
+    {x, fun check_duplicates/3}
+  ],
+  IsFilled = lists:nth(N, Field) /= 0,
+  if
+    CheckFilled == IsFilled -> check_until(Funs, [Field, N, Size], fun(Res, _) -> Res end);
+    IsFilled -> filled;
+    true -> empty
+  end.
+
+%% Проверяет, можно ли данную клетку заполнить на основании того, что рядом есть пара одинаковых
+check_pairs(Field, N, Size) ->
+  Funs = [
+    {above, fun get_pair_above/3},
+    {right, fun get_pair_right/3},
+    {below, fun get_pair_below/3},
+    {left, fun get_pair_left/3}],
+  check_until(Funs, [Field, N, Size],
+    fun
+      ([A, A], Tag) when A > 0 -> {pair, 3 - A, Tag};
+      (_, _) -> false
+    end).
+
+%% Проверяет, можно ли данную клетку заполнить на основании того, она стоит между двумя одинаковыми
+check_twins(Field, N, Size) ->
+  Funs = [
+    {vertical, fun get_twins_vertical/3},
+    {horizontal, fun get_twins_horizontal/3}],
+  check_until(Funs, [Field, N, Size],
+    fun
+      ([A, A], Tag) when A > 0 -> {twins, 3 - A, Tag};
+      (_, _) -> false
+    end).
+
+%% Проверяет, можно ли данную клетку заполнить на основании того, что половина строки или колонки уже заполнена одним цветом
+check_others(Field, N, Size) ->
+  Funs = [
+    {row, fun get_row_others/3},
+    {column, fun get_column_others/3}],
+  check_until(Funs, [Field, N, Size],
+    fun(Res, Tag) ->
+      Ones = count_elements(Res, 1),
+      Twos = count_elements(Res, 2),
+      if
+        Ones == Size / 2 -> {others, 2, Tag};
+        Twos == Size / 2 -> {others, 1, Tag};
+        true -> false
+      end
+    end).
+
+check_duplicate_row(Field, N, Size) ->
+  Row = get_row(Field, N, Size),
+  case count_elements(Row, 0) of
+    2 ->
+      XPos = get_xpos(N, Size),
+      case find_duplicate_row(Field, Row, Size) of
+        false -> false;
+        Res -> {duplicate, 3 - lists:nth(XPos, Res), row}
+      end;
+    _ -> false
+  end.
+
+check_duplicate_column(Field, N, Size) ->
+  Column = get_column(Field, N, Size),
+  case count_elements(Column, 0) of
+    2 ->
+      YPos = get_ypos(N, Size),
+      case find_duplicate_column(Field, Column, Size) of
+        false -> false;
+        Res -> {duplicate, 3 - lists:nth(YPos, Res), column}
+      end;
+    _ -> false
+  end.
+
+check_duplicates(Field, N, Size) ->
+  case check_duplicate_row(Field, N, Size) of
+    false -> check_duplicate_column(Field, N, Size);
+    Res -> Res
+  end.
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Механика игры
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %% Создает новое пустое поле
 new(N) when N > 0, N rem 2 == 0 -> lists:duplicate(N * N, 0).
 
 %% Вычисляет длину стороны поля по массиву-представлению
 field_size(Field) -> trunc(math:sqrt(length(Field))).
-
-%% Считает в списке количество элементов, равных указанному
-count_elements(List, E) ->
-  lists:foldl(fun(I, Acc) -> if I == E -> Acc + 1; true -> Acc end end, 0, List).
 
 %% Вспомогательная функция для последовательной проверки условий
 check_until([], _, _) -> false;
@@ -132,161 +327,20 @@ find_duplicate_column(N, Field, Sample, Size) when N > 0 ->
   end.
 
 
-%% Проверка ячейки на всё
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Утилиты
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-%% Проверяет, можно ли данную клетку заполнить на основании того, что рядом есть пара одинаковых
-check_pairs(Field, N, Size) ->
-  Funs = [
-    {above, fun get_pair_above/3},
-    {right, fun get_pair_right/3},
-    {below, fun get_pair_below/3},
-    {left, fun get_pair_left/3}],
-  check_until(Funs, [Field, N, Size],
-    fun
-      ([A, A], Tag) when A > 0 -> {pair, 3 - A, Tag};
-      (_, _) -> false
-    end).
+%% Выводит поле на экран
+print_field(Field) when is_list(Field) -> print_field(Field, field_size(Field)), io:format("~n").
 
-%% Проверяет, можно ли данную клетку заполнить на основании того, она стоит между двумя одинаковыми
-check_twins(Field, N, Size) ->
-  Funs = [
-    {vertical, fun get_twins_vertical/3},
-    {horizontal, fun get_twins_horizontal/3}],
-  check_until(Funs, [Field, N, Size],
-    fun
-      ([A, A], Tag) when A > 0 -> {twins, 3 - A, Tag};
-      (_, _) -> false
-    end).
+print_field([], _) -> ok;
+print_field(Field, N) ->
+  {Row, Tail} = lists:split(N, Field),
+  print_row(Row),
+  print_field(Tail, N).
 
-%% Проверяет, можно ли данную клетку заполнить на основании того, что половина строки или колонки уже заполнена одним цветом
-check_others(Field, N, Size) ->
-  Funs = [
-    {row, fun get_row_others/3},
-    {column, fun get_column_others/3}],
-  check_until(Funs, [Field, N, Size],
-    fun(Res, Tag) ->
-      Ones = count_elements(Res, 1),
-      Twos = count_elements(Res, 2),
-      if
-        Ones == Size / 2 -> {others, 2, Tag};
-        Twos == Size / 2 -> {others, 1, Tag};
-        true -> false
-      end
-    end).
-
-check_duplicate_row(Field, N, Size) ->
-  Row = get_row(Field, N, Size),
-  case count_elements(Row, 0) of
-    2 ->
-      XPos = get_xpos(N, Size),
-      case find_duplicate_row(Field, Row, Size) of
-        false -> false;
-        Res -> {duplicate, 3 - lists:nth(XPos, Res), row}
-      end;
-    _ -> false
-  end.
-
-check_duplicate_column(Field, N, Size) ->
-  Column = get_column(Field, N, Size),
-  case count_elements(Column, 0) of
-    2 ->
-      YPos = get_ypos(N, Size),
-      case find_duplicate_column(Field, Column, Size) of
-        false -> false;
-        Res -> {duplicate, 3 - lists:nth(YPos, Res), column}
-      end;
-    _ -> false
-  end.
-
-check_duplicates(Field, N, Size) ->
-  case check_duplicate_row(Field, N, Size) of
-    false -> check_duplicate_column(Field, N, Size);
-    Res -> Res
-  end.
-
-%% Проверяет ячейку на все условия, возвращает первый найденный повод заполнить ее, false или filled для уже заполненных
-check_cell(Field, N, Size) -> check_cell(Field, N, Size, false).
-check_cell(Field, N, Size, CheckFilled) ->
-  Funs = [
-    {x, fun check_twins/3},
-    {x, fun check_pairs/3},
-    {x, fun check_others/3},
-    {x, fun check_duplicates/3}
-  ],
-  IsFilled = lists:nth(N, Field) /= 0,
-  if
-    CheckFilled == IsFilled -> check_until(Funs, [Field, N, Size], fun(Res, _) -> Res end);
-    IsFilled -> filled;
-    true -> empty
-  end.
-
-%% Получает для каждой ячейки повод ее заполнить
-check_field(Field, Parallel) -> check_field(Field, Parallel, false).
-check_field(Field, Parallel, CheckFilled) ->
-  Size = field_size(Field),
-  apply(case Parallel of true -> fun pmap/2; _ -> fun lists:map/2 end,
-    [fun(N) -> check_cell(Field, N, Size, CheckFilled) end, lists:seq(1, Size * Size)]).
-
-set_nth(N, List, Val) when N > 0 -> set_nth([], N, List, Val).
-set_nth(Acc, 1, [_ | T], Val) -> lists:reverse(Acc, [Val | T]);
-set_nth(Acc, N, [H | T], Val) -> set_nth([H | Acc], N - 1, T, Val).
-
-find_all(Val, List) ->
-  {_, RRes} = lists:foldl(fun(I, {N, Acc}) ->
-    {N + 1, case I of Val -> [N | Acc]; _ -> Acc end}
-  end, {1, []}, List),
-  lists:reverse(RRes).
-
-%% Заполняет случайную клетку допустимым образом (соблюдая правила)
-random_step_checked(Field, Parallel) ->
-  Suggestions = check_field(Field, Parallel),
-  AvailPositions = find_all(false, Suggestions),
-  case AvailPositions of
-    [] -> {impossibru, Field};
-    _ ->
-      NextPos = random:uniform(length(AvailPositions)),
-      NextVal = random:uniform(2),
-      {ok, set_nth(lists:nth(NextPos, AvailPositions), Field, NextVal)}
-  end.
-
-%% Применяет к полю указанные предложения
-apply_suggestions(Field, Suggestions) ->
-  [begin
-     case Sugg of
-       {_, Val, _} -> Val;
-       _ -> Old
-     end
-   end || {Old, Sugg} <- lists:zip(Field, Suggestions)].
-
-is_solved(Field) -> lists:all(fun(I) -> I /= 0 end, Field).
-
-any_suggestions(Suggestions) -> lists:any(fun({_, _, _}) -> true; (_) -> false end, Suggestions).
-
-%% Пытается решить заданное поле
-try_solve(Field, Parallel) -> try_solve_2([Field], Parallel).
-try_solve_2([LastStep | Steps], Parallel) ->
-  case is_solved(LastStep) of
-    true -> {ok, lists:reverse([LastStep | Steps])};
-    _ ->
-      Suggestions = check_field(LastStep, Parallel),
-      case any_suggestions(Suggestions) of
-        true ->
-          NextStep = apply_suggestions(LastStep, Suggestions),
-          try_solve_2([NextStep, LastStep | Steps], Parallel);
-        _ -> {impossibru, lists:reverse([LastStep | Steps])}
-      end
-  end.
-
-%% Генерирует поле путем постепенного заполнения клеток рандомом и пытаясь решить каждую итерацию
-generate(Size, Parallel) ->
-  Initial = takuzu:new(Size), %%takuzu:power_fun(fun takuzu:random_step/1, 2, takuzu:new(Size)),
-  generate_solvable(Initial, Parallel).
-
-generate_print(Size, Parallel) ->
-  {ok, Res} = generate(Size, Parallel),
-  {Ones, Twos} = {count_elements(Res, 1), count_elements(Res, 2)},
-  io:format("Generation done, O:~p, X:~p~n", [Ones, Twos]),
-  print_field(Res).
+print_row(Row) -> io:format("~s~n", [lists:flatten([[element(X + 1, {$., $O, $X}) | " "] || X <- Row])]).
 
 stats(List) ->
   Len = length(List),
@@ -309,55 +363,19 @@ pmap_gather([Pid | T], Ref) ->
   end;
 pmap_gather([], _) -> [].
 
-measure(F, Count) ->
-  {TotalTime, Times} = (timer:tc(fun() ->
-    lists:map(fun(_) -> {MSec, _} = timer:tc(fun() -> F() end), MSec end, lists:seq(1, Count)) end)),
-%%   io:format("~p~n", [Times]),
-  {TotalTime / 1000, stats(Times)}.
+set_nth(N, List, Val) when N > 0 -> set_nth([], N, List, Val).
+set_nth(Acc, 1, [_ | T], Val) -> lists:reverse(Acc, [Val | T]);
+set_nth(Acc, N, [H | T], Val) -> set_nth([H | Acc], N - 1, T, Val).
 
-generate_solvable(Field, Parallel) ->
-  %% Пробуем решить что дали
-  {SolveRes, [First | _]} = try_solve(Field, Parallel),
-  case SolveRes of
-    ok -> {ok, reduce_solvable(First, Parallel)}; %% Если решилось, это вин
-    _ -> case random_step_checked(Field, Parallel) of %% Если не решилось, заполняем случайную клетку допустимым образом
-           {ok, NextGen} ->
-%%              print_field(Field),
-             generate_solvable(NextGen, Parallel) %% Если заполнилось, снова пытаемся решить
-%%           _ -> {impossibru, Field} %% Если не заполнилось, тогда ой, этого вообще быть не может
-         end
-  end.
+find_all(Val, List) ->
+  {_, RRes} = lists:foldl(fun(I, {N, Acc}) ->
+    {N + 1, case I of Val -> [N | Acc]; _ -> Acc end}
+  end, {1, []}, List),
+  lists:reverse(RRes).
 
-%% Применяет к полю указанные предложения
-remove_suggestions(Field, Suggestions) ->
-  [begin
-     case Sugg of
-       {_, Old, _} -> 0;
-       _ -> Old
-     end
-   end || {Old, Sugg} <- lists:zip(Field, Suggestions)].
-
-reduce_solvable(Field, Parallel) ->
-  Suggestions = check_field(Field, Parallel, true),
-  case remove_suggestions(Field, Suggestions) of
-    Field -> Field;
-    StrippedField ->
-%%       print_field(Field),
-%%       io:format("Can remove: ~p~n", [Suggestions]),
-      reduce_solvable(StrippedField, Parallel)
-  end.
-
-
-%% Выводит поле на экран
-print_field(Field) when is_list(Field) -> print_field(Field, field_size(Field)), io:format("~n").
-
-print_field([], _) -> ok;
-print_field(Field, N) ->
-  {Row, Tail} = lists:split(N, Field),
-  print_row(Row),
-  print_field(Tail, N).
-
-print_row(Row) -> io:format("~s~n", [lists:flatten([[element(X + 1, {$., $O, $X}) | " "] || X <- Row])]).
+%% Считает в списке количество элементов, равных указанному
+count_elements(List, E) ->
+  lists:foldl(fun(I, Acc) -> if I == E -> Acc + 1; true -> Acc end end, 0, List).
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
