@@ -48,10 +48,12 @@ measure(F, Count) ->
 
 generate_solvable(Field, Parallel) ->
   %% Пробуем решить что дали
-  {SolveRes, [First | _]} = try_solve(Field, Parallel),
+  InitialCheckRes = check_field(Field, Parallel), %% Чтобы два раза не считать одно и то же
+  {SolveRes, [First | _]} = try_solve(Field, Parallel, InitialCheckRes),
   case SolveRes of
     ok -> {ok, reduce_solvable(First, Parallel)}; %% Если решилось, это вин
-    _ -> case random_step_checked(Field, Parallel) of %% Если не решилось, заполняем случайную клетку допустимым образом
+    _ ->
+      case random_step_checked(Field, Parallel, InitialCheckRes) of %% Если не решилось, заполняем случайную клетку допустимым образом
            {ok, NextGen} ->
 %%              print_field(Field),
              generate_solvable(NextGen, Parallel) %% Если заполнилось, снова пытаемся решить
@@ -60,16 +62,19 @@ generate_solvable(Field, Parallel) ->
   end.
 
 %% Пытается решить заданное поле
-try_solve(Field, Parallel) -> try_solve_2([Field], Parallel).
-try_solve_2([LastStep | Steps], Parallel) ->
+try_solve(Field, Parallel, InitialCheckRes) -> try_solve_2([Field], Parallel, InitialCheckRes).
+try_solve_2([LastStep | Steps], Parallel, InitialCheckRes) ->
   case is_solved(LastStep) of
     true -> {ok, lists:reverse([LastStep | Steps])};
     _ ->
-      Suggestions = check_field(LastStep, Parallel),
+      Suggestions = case InitialCheckRes of
+                      none -> check_field(LastStep, Parallel);
+                      _ -> InitialCheckRes
+                    end,
       case any_suggestions(Suggestions) of
         true ->
           NextStep = apply_suggestions(LastStep, Suggestions),
-          try_solve_2([NextStep, LastStep | Steps], Parallel);
+          try_solve_2([NextStep, LastStep | Steps], Parallel, none);
         _ -> {impossibru, lists:reverse([LastStep | Steps])}
       end
   end.
@@ -88,8 +93,8 @@ apply_suggestions(Field, Suggestions) ->
    end || {Old, Sugg} <- lists:zip(Field, Suggestions)].
 
 %% Заполняет случайную клетку допустимым образом (соблюдая правила)
-random_step_checked(Field, Parallel) ->
-  Suggestions = check_field(Field, Parallel),
+random_step_checked(Field, Parallel, Suggestions) ->
+%%   Suggestions = check_field(Field, Parallel),
   AvailPositions = find_all(false, Suggestions),
   case AvailPositions of
     [] -> {impossibru, Field};
